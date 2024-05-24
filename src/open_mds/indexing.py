@@ -3,10 +3,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 import numpy as np
+import os
 import pandas as pd
 import pyterrier as pt
-from datasets import load_dataset
-from nltk.tokenize import wordpunct_tokenize
+from datasets import load_dataset, load_from_disk
+from nltk.tokenize import wordpunct_tokenize, sent_tokenize
 from tqdm import tqdm
 from transformers.utils import is_offline_mode
 
@@ -53,10 +54,29 @@ def _sanitize_query(topics: pd.DataFrame) -> pd.DataFrame:
 class HuggingFacePyTerrierDataset(pt.datasets.Dataset):
     """Simple wrapper for the PyTerrier Dataset class to make it easier to interface with HuggingFace Datasets."""
 
-    def __init__(self, path: str, name: Optional[str] = None, **kwargs) -> None:
+    def __init__(self, path: str, name: Optional[str] = None, granularity: str = None, **kwargs) -> None:
         self.path = path
         self.name = name
-        self._hf_dataset = load_dataset(self.path, self.name, **kwargs)
+
+        # Note: None and document are the same thing
+        if granularity != None and granularity != "document" and granularity != "paragraph" and granularity != "sentence":
+            raise ValueError(f"Invalid granularity type: {granularity}! Choose between: document, paragraph, or sentence.")
+        else:
+            self.granularity = granularity
+
+        if (self.name != None and Path(self.name).is_dir()):
+            self._hf_dataset = load_from_disk(self.name)
+        elif self.name == "allenai/cochrane_dense_mean" or self.name == "allenai/ms2_dense_mean" or self.name == "allenai/multixscience_dense_mean":
+            self._hf_dataset = load_dataset(self.name, **kwargs)
+        else:
+            self._hf_dataset = load_dataset(self.path, self.name, **kwargs)
+
+        # datasets = load_dataset(self.path, self.name, split=['train[:01%]', 'validation[:01%]', 'test[:01%]'], **kwargs)
+        # from datasets import DatasetDict
+        # self._hf_dataset = DatasetDict()
+        # self._hf_dataset['train'] = datasets[0]
+        # self._hf_dataset['validation'] = datasets[1]
+        # self._hf_dataset['test'] = datasets[2]
 
     def replace(
         self, example: Dict[str, Any], idx: int, *, split: str, retrieved: pd.DataFrame, k: Optional[int] = None
@@ -216,7 +236,7 @@ class CanonicalMDSDataset(HuggingFacePyTerrierDataset):
 
 class MultiXScienceDataset(HuggingFacePyTerrierDataset):
     def __init__(self, **kwargs):
-        super().__init__("multi_x_science_sum", None, **kwargs)
+        super().__init__("multi_x_science_sum", **kwargs)
 
         # Collect all documents in the dataset in a way thats easy to lookup
         self._documents = {}
@@ -247,13 +267,47 @@ class MultiXScienceDataset(HuggingFacePyTerrierDataset):
                 total=len(self._hf_dataset[split]),
                 disable=not verbose,
             ):
-                for docno, text in zip(example["ref_abstract"]["mid"], example["ref_abstract"]["abstract"]):
-                    text = text.strip()
-                    # Don't index duplicate or empty documents
-                    if docno in yielded or not text:
-                        continue
-                    yielded.add(docno)
-                    yield {"docno": docno, "text": text}
+                if self.granularity == "sentence":
+                    for docno, text in zip(example["ref_abstract"]["mid"], example["ref_abstract"]["abstract"]):
+                        text = text.strip()
+                        # Don't index duplicate or empty documents
+                        if docno in yielded or not text:
+                            continue
+
+                        text_list = sent_tokenize(text)
+                        for idx, text in enumerate(text_list):
+                            actual_id = docno + "_" + str(idx)
+                            if actual_id in yielded:
+                                continue
+                            yielded.add(actual_id)
+
+                            yield {"docno": actual_id, "text": text.strip()}
+
+                elif self.granularity == "paragraph":
+                    for docno, text in zip(example["ref_abstract"]["mid"], example["ref_abstract"]["abstract"]):
+                        text = text.strip()
+                        # Don't index duplicate or empty documents
+                        if docno in yielded or not text:
+                            continue
+                        
+                        text_list = text.split("\n")
+                        for idx, t in enumerate(text_list):
+                            actual_id = docno + "_" + str(idx)
+                            if actual_id in yielded:
+                                continue
+                            yielded.add(actual_id)
+
+                            yield {"docno": actual_id, "text": t.strip()}
+
+                else:
+                    for docno, text in zip(example["ref_abstract"]["mid"], example["ref_abstract"]["abstract"]):
+                        text = text.strip()
+                        # Don't index duplicate or empty documents
+                        if docno in yielded or not text:
+                            continue
+                        yielded.add(docno)
+                        yield {"docno": docno, "text": text}
+
 
     def get_topics(self, split: str, max_examples: Optional[int] = None) -> pd.DataFrame:
         dataset = self._hf_dataset[split]
@@ -339,14 +393,45 @@ class MSLR2022Dataset(HuggingFacePyTerrierDataset):
                 total=len(self._hf_dataset[split]),
                 disable=not verbose,
             ):
-                for title, abstract, pmid in zip(example["title"], example["abstract"], example["pmid"]):
-                    title = title.strip()
-                    abstract = abstract.strip()
-                    # Don't index duplicate or empty documents
-                    if pmid in yielded or not title + abstract:
-                        continue
-                    yielded.add(pmid)
-                    yield {"docno": pmid, "text": f"{title} {abstract}"}
+                if self.granularity == "sentence":
+                    for title, abstract, pmid in zip(example["title"], example["abstract"], example["pmid"]):
+                        title = title.strip()
+                        abstract = abstract.strip()
+                        if not title + abstract:
+                            continue
+                            
+                        text_list = sent_tokenize(title.strip()) + sent_tokenize(abstract)
+                        for idx, text in enumerate(text_list):
+                            actual_id = pmid + "_" + str(idx)
+                            if actual_id in yielded:
+                                continue
+                            yielded.add(actual_id)
+
+                            yield {"docno": actual_id, "text": f"{text.strip()}"}
+                elif self.granularity == "paragraph":
+                    for title, abstract, pmid in zip(example["title"], example["abstract"], example["pmid"]):
+                        title = title.strip()
+                        abstract = abstract.strip()
+                        if not title + abstract:
+                            continue
+                        
+                        text_list = [title] + abstract.split("\n")
+                        for idx, text in enumerate(text_list):
+                            actual_id = pmid + "_" + str(idx)
+                            if actual_id in yielded:
+                                continue
+                            yielded.add(actual_id)
+
+                            yield {"docno": actual_id, "text": f"{text.strip()}"}
+                else:
+                    for title, abstract, pmid in zip(example["title"], example["abstract"], example["pmid"]):
+                        title = title.strip()
+                        abstract = abstract.strip()
+                        # Don't index duplicate or empty documents
+                        if pmid in yielded or not title + abstract:
+                            continue
+                        yielded.add(pmid)
+                        yield {"docno": pmid, "text": f"{title} {abstract}"}
 
     def get_topics(self, split: str, max_examples: Optional[int] = None) -> pd.DataFrame:
         dataset = self._hf_dataset[split]
@@ -396,3 +481,83 @@ class MSLR2022Dataset(HuggingFacePyTerrierDataset):
             stats["avg_tokens_per_summary"] = np.mean(summ_lens)
 
         return stats
+
+class RottenTomatoesDataset(pt.datasets.Dataset):
+    def __init__(self, **kwargs) -> None:
+        # Initialize and save the inputs
+        # Collect all documents in the dataset in a way thats easy to lookup
+        self._documents = {}
+        self.data_dir = "/work/frink/li.mil/data/rotten_tomatoes"
+        self.splits = ["train.csv", "eval.csv", "test.csv"]
+        idx = 0
+        for split in self.splits:
+            path = os.path.join(self.data_dir, split)
+            df = pd.read_csv(path)
+            for index, row in df.iterrows():
+                title = row['movie_title']
+                background = row['movie_info']
+                sent = row['individual_reviews']
+                # For the sentiments, tokenize and then put them into a list
+                sentiments = sent.split("sep")
+
+                target = row['critics_consensus']
+                self._documents[index] = {
+                    "idx": f"movie_{idx}",
+                    "title": title,
+                    "background": background,
+                    "sentiments": sentiments,
+                    "target": target
+                }
+
+                idx += 1
+
+    def get_corpus_iter(self, verbose: bool = False):
+        # breakpoint()
+        yielded = set()
+        for split in self.splits:
+            path = os.path.join(self.data_dir, split)
+            df = pd.read_csv(path)
+            for idx, example in tqdm(
+                df.iterrows(),
+                desc="Indexing {split}",
+                total=len(df.index),
+                disable=not verbose,
+            ):
+                if not isinstance(example['movie_title'], float):
+                    title = example['movie_title'].strip()
+                else:
+                    title = str(example['movie_title'])
+                
+                if not isinstance(example['movie_info'], float):
+                    background = example['movie_info'].strip()
+                else:
+                    background = str(example['movie_info'])
+
+                reviews = example['individual_reviews'].split("sep")
+                for text in reviews:
+                    t = text.strip()
+                    
+                    # Don't index duplicate or empty documents
+                    if idx in yielded or not title + background + t:
+                        continue
+                    yielded.add(idx)
+                    yield {"docno": idx, "text": f"{title} {background} {t}"}
+
+    def get_topics(self, split: str, max_examples: Optional[int] = None) -> pd.DataFrame:
+        dataset = self._hf_dataset[split]
+        if max_examples:
+            dataset = dataset[:max_examples]
+        # Cochrane does not contain a background section, so use the target as query instead
+        queries = dataset["background"] if self.name == "ms2" else dataset["target"]
+        qids = dataset["review_id"]
+        topics = pd.DataFrame({"qid": qids, "query": queries})
+        return _sanitize_query(topics)
+
+    def get_qrels(self, split: str) -> pd.DataFrame:
+        dataset = self._hf_dataset[split]
+        qids, docnos = [], []
+        for example in dataset:
+            qids.extend([example["review_id"]] * len(example["pmid"]))
+            docnos.extend(example["pmid"])
+        labels = [1] * len(qids)
+        return pd.DataFrame({"qid": qids, "docno": docnos, "label": labels})

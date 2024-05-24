@@ -14,8 +14,8 @@ do_train: true
 do_eval: true
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
-gradient_accumulation_steps: 4  # Expects 4 GPUs to be used for a total effective batch size of 16
-learning_rate: 3e-5
+gradient_accumulation_steps: 16  # Expects 4 GPUs to be used for a total effective batch size of 16
+learning_rate: 3e-6
 weight_decay: 0.01
 num_train_epochs: 20
 warmup_ratio: 0.1
@@ -23,7 +23,6 @@ label_smoothing_factor: 0.1
 # Controls the evaluation strategy
 evaluation_strategy: "steps"
 eval_steps: 500
-eval_delay: 5000
 # Controls the checkpointing strategy
 save_strategy: "steps"
 save_steps: 500

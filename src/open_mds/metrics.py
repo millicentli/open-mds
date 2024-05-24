@@ -71,7 +71,7 @@ def compute_bertscore(*, predictions: List[str], references: List[str], **kwargs
         # These are mostly based on the recommendations in https://github.com/Tiiiger/bert_score
         model_type=BERTSCORE_MODEL_TYPE,
         lang="en",
-        rescale_with_baseline=True,
+        # rescale_with_baseline=True,
         use_fast_tokenizer=True,
         **kwargs,
     )

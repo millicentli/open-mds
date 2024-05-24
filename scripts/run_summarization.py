@@ -341,6 +341,12 @@ class RetrievalArguments:
         },
     )
 
+@dataclass
+class GenerationArguments:
+    no_repeat_ngram_size: int = field(
+        default=0,
+        metadata={"help": "Adding an ngram penalty for generation."}
+    )
 
 summarization_name_mapping = {
     "amazon_reviews_multi": ("review_body", "review_title"),
@@ -364,20 +370,20 @@ def main():
     # We now keep distinct sets of args, for a cleaner separation of concerns.
 
     parser = HfArgumentParser(
-        (ModelArguments, DataTrainingArguments, Seq2SeqTrainingArguments, PerturbationArguments, RetrievalArguments)
+        (ModelArguments, DataTrainingArguments, Seq2SeqTrainingArguments, PerturbationArguments, RetrievalArguments, GenerationArguments)
     )
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, training_args, perturbation_args, retrieval_args = parser.parse_json_file(
+        model_args, data_args, training_args, perturbation_args, retrieval_args, generation_args = parser.parse_json_file(
             json_file=os.path.abspath(sys.argv[1])
         )
     # Our unique parsing strategy (which depends on OmegaConf) exists here
     elif any(argv.endswith(".yml") for argv in sys.argv[1:]):
         conf = util.parse_omega_conf()
-        model_args, data_args, training_args, perturbation_args, retrieval_args = parser.parse_dict(conf)
+        model_args, data_args, training_args, perturbation_args, retrieval_args, generation_args = parser.parse_dict(conf)
     else:
-        model_args, data_args, training_args, perturbation_args, retrieval_args = parser.parse_args_into_dataclasses()
+        model_args, data_args, training_args, perturbation_args, retrieval_args, generation_args = parser.parse_args_into_dataclasses()
 
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
@@ -505,8 +511,18 @@ def main():
         use_auth_token=True if model_args.use_auth_token else None,
         trust_remote_code=model_args.trust_remote_code,
     )
+    # import torch
+    # model = torch.compile(model)
 
     model.resize_token_embeddings(len(tokenizer))
+
+    # Set generation args...
+    training_args.generation_max_length = data_args.max_target_length
+    
+    if data_args.num_beams is not None:
+        training_args.generation_num_beams = data_args.num_beams
+    
+    # model.generation_config.no_repeat_ngram_size = generation_args.no_repeat_ngram_size
 
     if model.config.decoder_start_token_id is None and isinstance(tokenizer, (MBartTokenizer, MBartTokenizerFast)):
         if isinstance(tokenizer, MBartTokenizer):
@@ -551,6 +567,25 @@ def main():
         logger.info("There is nothing to do. Please pass `do_train`, `do_eval` and/or `do_predict`.")
         return
 
+    # # TODO: debugging; remove later
+    from datasets import Dataset
+    # d = {
+    #     "review_id": [raw_datasets['train']['review_id'][0]],
+    #     "pmid": [raw_datasets['train']['pmid'][0]],
+    #     "title": [raw_datasets['train']['title'][0]],
+    #     "abstract": [raw_datasets['train']['abstract'][0]],
+    #     "target": [raw_datasets['train']['target'][0]]
+    # }
+    # d = {
+    #     "aid": [raw_datasets['train']['aid'][0]],
+    #     "mid": [raw_datasets['train']['mid'][0]],
+    #     "abstract": [raw_datasets['train']['abstract'][0]],
+    #     "related_work": [raw_datasets['train']['related_work'][0]],
+    #     "ref_abstract": [raw_datasets['train']['ref_abstract'][0]]
+    # }
+    # raw_datasets['train'] = Dataset.from_dict(d)
+    # raw_datasets['validation'] = Dataset.from_dict(d)
+    # raw_datasets['test'] = Dataset.from_dict(d)
     if isinstance(tokenizer, tuple(MULTILINGUAL_TOKENIZERS)):
         assert (
             data_args.lang is not None
@@ -597,7 +632,6 @@ def main():
 
     def _preprocess_batch(examples) -> Dict[str, List[str]]:
         """Handles the logic for preprocessing a batch of examples."""
-
         inputs, targets = [], []
         for i in range(len(examples[text_column])):
             # remove pairs where at least one record is None
@@ -823,13 +857,14 @@ def main():
     )
 
     # Metrics
-
     def compute_metrics(eval_preds):
         preds, labels, inputs = eval_preds.predictions, eval_preds.label_ids, eval_preds.inputs
+        # breakpoint()
         if isinstance(preds, tuple):
             preds = preds[0]
-        decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
         if data_args.ignore_pad_token_for_loss:
+            preds = np.where(preds != -100, preds, tokenizer.pad_token_id)
+            decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
             # Replace -100 in the labels as we can't decode them.
             labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
             if inputs is not None:
@@ -854,22 +889,22 @@ def main():
 
         # Log some additional, split-dependent information in the results dictionary
         # Perturbations
-        results["perturbation"] = perturbation_args.perturbation
-        results["selection_strategy"] = perturbation_args.selection_strategy
-        results["perturbed_frac"] = perturbation_args.perturbed_frac
-        results["perturbed_seed"] = perturbation_args.perturbed_seed
+        # results["perturbation"] = perturbation_args.perturbation
+        # results["selection_strategy"] = perturbation_args.selection_strategy
+        # results["perturbed_frac"] = perturbation_args.perturbed_frac
+        # results["perturbed_seed"] = perturbation_args.perturbed_seed
         # Retrieval
-        results["retriever"] = retrieval_args.retriever
-        results["top_k_strategy"] = retrieval_args.top_k_strategy
+        # results["retriever"] = retrieval_args.retriever
+        # results["top_k_strategy"] = retrieval_args.top_k_strategy
         # I/O
         results["labels"] = decoded_labels
         results["preds"] = decoded_preds
-        if inputs is not None:
-            results["inputs"] = util.batch_decode_multi_doc(inputs, tokenizer, doc_sep_token=doc_sep_token)
+        # if inputs is not None:
+            # results["inputs"] = util.batch_decode_multi_doc(inputs, tokenizer, doc_sep_token=doc_sep_token)
         # Add length of reference and generated summaries
-        results["label_len"] = [np.count_nonzero(label != tokenizer.pad_token_id) for label in labels]
-        results["pred_len"] = [np.count_nonzero(pred != tokenizer.pad_token_id) for pred in preds]
-        results["input_len"] = [np.count_nonzero(example != tokenizer.pad_token_id) for example in inputs]
+        # results["label_len"] = [np.count_nonzero(label != tokenizer.pad_token_id) for label in labels]
+        # results["pred_len"] = [np.count_nonzero(pred != tokenizer.pad_token_id) for pred in preds]
+        # results["input_len"] = [np.count_nonzero(example != tokenizer.pad_token_id) for example in inputs]
         return results
 
     # Log some additional, split-agnositic information in the all_results dictionary
@@ -880,6 +915,17 @@ def main():
         "dataset_name": data_args.dataset_name,
         "dataset_config_name": data_args.dataset_config_name,
     }
+
+    # from datasets import Dataset
+    # d = {
+    #     "input_ids": [train_dataset['input_ids'][0]],
+    #     "attention_mask": [train_dataset['attention_mask'][0]],
+    #     "labels": [train_dataset['labels'][0]],
+    #     "global_attention_mask": [train_dataset['global_attention_mask'][0]]
+    # }
+    # train_dataset = Dataset.from_dict(d)
+    # eval_dataset = Dataset.from_dict(d)
+    # breakpoint()
 
     # Initialize our Trainer
     trainer = Seq2SeqTrainer(
