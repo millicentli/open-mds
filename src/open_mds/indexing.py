@@ -438,7 +438,9 @@ class MSLR2022Dataset(HuggingFacePyTerrierDataset):
         if max_examples:
             dataset = dataset[:max_examples]
         # Cochrane does not contain a background section, so use the target as query instead
-        queries = dataset["background"] if self.name == "ms2" else dataset["target"]
+        # queries = dataset["background"] if self.name == "ms2" else dataset["target"]
+        # We don't use the background or target like in prior works but instead use titles from the crowdsourced studies
+        queries = dataset["review_id_title"]        
         qids = dataset["review_id"]
         topics = pd.DataFrame({"qid": qids, "query": queries})
         return _sanitize_query(topics)
@@ -481,83 +483,3 @@ class MSLR2022Dataset(HuggingFacePyTerrierDataset):
             stats["avg_tokens_per_summary"] = np.mean(summ_lens)
 
         return stats
-
-class RottenTomatoesDataset(pt.datasets.Dataset):
-    def __init__(self, **kwargs) -> None:
-        # Initialize and save the inputs
-        # Collect all documents in the dataset in a way thats easy to lookup
-        self._documents = {}
-        self.data_dir = "/work/frink/li.mil/data/rotten_tomatoes"
-        self.splits = ["train.csv", "eval.csv", "test.csv"]
-        idx = 0
-        for split in self.splits:
-            path = os.path.join(self.data_dir, split)
-            df = pd.read_csv(path)
-            for index, row in df.iterrows():
-                title = row['movie_title']
-                background = row['movie_info']
-                sent = row['individual_reviews']
-                # For the sentiments, tokenize and then put them into a list
-                sentiments = sent.split("sep")
-
-                target = row['critics_consensus']
-                self._documents[index] = {
-                    "idx": f"movie_{idx}",
-                    "title": title,
-                    "background": background,
-                    "sentiments": sentiments,
-                    "target": target
-                }
-
-                idx += 1
-
-    def get_corpus_iter(self, verbose: bool = False):
-        # breakpoint()
-        yielded = set()
-        for split in self.splits:
-            path = os.path.join(self.data_dir, split)
-            df = pd.read_csv(path)
-            for idx, example in tqdm(
-                df.iterrows(),
-                desc="Indexing {split}",
-                total=len(df.index),
-                disable=not verbose,
-            ):
-                if not isinstance(example['movie_title'], float):
-                    title = example['movie_title'].strip()
-                else:
-                    title = str(example['movie_title'])
-                
-                if not isinstance(example['movie_info'], float):
-                    background = example['movie_info'].strip()
-                else:
-                    background = str(example['movie_info'])
-
-                reviews = example['individual_reviews'].split("sep")
-                for text in reviews:
-                    t = text.strip()
-                    
-                    # Don't index duplicate or empty documents
-                    if idx in yielded or not title + background + t:
-                        continue
-                    yielded.add(idx)
-                    yield {"docno": idx, "text": f"{title} {background} {t}"}
-
-    def get_topics(self, split: str, max_examples: Optional[int] = None) -> pd.DataFrame:
-        dataset = self._hf_dataset[split]
-        if max_examples:
-            dataset = dataset[:max_examples]
-        # Cochrane does not contain a background section, so use the target as query instead
-        queries = dataset["background"] if self.name == "ms2" else dataset["target"]
-        qids = dataset["review_id"]
-        topics = pd.DataFrame({"qid": qids, "query": queries})
-        return _sanitize_query(topics)
-
-    def get_qrels(self, split: str) -> pd.DataFrame:
-        dataset = self._hf_dataset[split]
-        qids, docnos = [], []
-        for example in dataset:
-            qids.extend([example["review_id"]] * len(example["pmid"]))
-            docnos.extend(example["pmid"])
-        labels = [1] * len(qids)
-        return pd.DataFrame({"qid": qids, "docno": docnos, "label": labels})
