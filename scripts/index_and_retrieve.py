@@ -46,7 +46,7 @@ class TopKStrategy(str, Enum):
 
 @app.command()
 def main(
-    hf_dataset_name: Dataset = typer.Argument(
+    hf_dataset_name: str = typer.Argument(
         ..., case_sensitive=False, help="The name of a supported HuggingFace Dataset."
     ),
     output_dir: Path = typer.Argument(
@@ -110,8 +110,11 @@ def main(
         pt_dataset = indexing.CanonicalMDSDataset(path, doc_sep_token=doc_sep_token)
     elif hf_dataset_name == Dataset.multixscience:
         pt_dataset = indexing.MultiXScienceDataset()
-    elif hf_dataset_name == Dataset.ms2 or hf_dataset_name == Dataset.cochrane:
-        pt_dataset = indexing.MSLR2022Dataset(name=hf_dataset_name.value)
+    # elif hf_dataset_name == Dataset.ms2 or hf_dataset_name == Dataset.cochrane:
+    elif "cochrane" in hf_dataset_name or "ms2" in hf_dataset_name:
+        # pt_dataset = indexing.MSLR2022Dataset(name=hf_dataset_name.value)
+        # We change this and load our own custom dataset
+        pt_dataset = indexing.MSLR2022Dataset(name=hf_dataset_name)
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
